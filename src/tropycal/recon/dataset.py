@@ -1375,6 +1375,139 @@ class hdobs:
                              cmap=cmap,levels=np.linspace(min(prop['levels']),max(prop['levels']),256))
         ax.axis([0,max(radius),min(time),max(time)])
         
+        #------------------------------------------------------------------------------
+        
+        ################################
+        # Find peaks in the wind field #
+        ################################
+        # We're looking for the radius of maximum wind (RMW) and the second highest local maximum wind value.
+        # This doesn't apply to pressure.
+        if varname in ['sfmr','wspd','pkwnd']:
+            
+            # Finding the local max in the data requires scipy's argrelextrama function.
+            from scipy.signal import argrelextrema
+
+            # Smooth vardata values as in original code.
+            vardata_smth = gfilt1d(vardata,sigma=3,axis=1)
+
+            # Get indices of local maxima for each row of the data (i.e. for each time).
+            peak_indices = [argrelextrema(row, np.greater, order=3)[0] for row in vardata_smth]
+
+            # Make all the rows the same length.
+            min_len = min([len(row) for row in peak_indices])
+            peak_indices = np.array([row[0:min_len] for row in peak_indices])
+
+            # Find the values associated with the indices above.
+            peak_values = np.array([vardata_smth[i][peak_indices[i]] for i in np.arange(np.shape(vardata_smth)[0])])
+
+            # Delete indices whose wind speeds are less than 50 knots (strong TS strength).
+            # Wasn't confident an RMW line was meaningful when wind speeds were less than this during 2022 Fiona and Ian.
+            # Otherwise, 50 knots is an arbitrary threshold.
+            peak_indices = [np.delete(peak_indices[i], np.argwhere(peak_values[i]<50)) for i in np.arange(np.shape(peak_indices)[0])]
+            peak_values = [np.delete(peak_values[i], np.argwhere(peak_values[i]<50)) for i in np.arange(np.shape(peak_values)[0])]
+
+            # Get list of indices representing the highest and second-highest wind speeds per row.
+            index_top_1 = [peak_indices[i][np.argsort(peak_values[i], axis=0)[-1]] if len(np.argsort(peak_values[i], axis=0))>0 else None for i in np.arange(np.shape(peak_values)[0])]
+            index_top_2 = [peak_indices[i][np.argsort(peak_values[i], axis=0)[-2]] if len(np.argsort(peak_values[i], axis=0))>1 else None for i in np.arange(np.shape(peak_values)[0])]
+
+            # Get radii values associated with these indices. This is the x-value of lines to be plotted.
+            # Each item in the list corresponds to a time.
+            radii_1 = [radius[idx] if idx is not None else None for idx in index_top_1]
+            radii_2 = [radius[idx] if idx is not None else None for idx in index_top_2]
+
+            # Now the task is to turn radii_1 and radii_2 into collections of points so lines can be plotted.
+            # Rules:
+            # - We've already assured there are no wind speeds less than 50 knots represented.
+            # - We also don't want dramatic changes in radii. 
+            #   After some trialing, I set this at a 5km change in one time step.
+            #   If something's changed that dramatically, break the line to show that something's different.
+            # - Time continuity is important. Lines must be at least two consecutive values long.
+            # - Obviously, if there's a None item, a line should be ended. 
+
+            # These will be a list of lists, or a list of lines to be plotted.
+            # RMW x-values: radii_1_lines; y-values: radii_1_times
+            radii_1_lines = []
+            radii_2_lines = []
+            radii_1_times = []
+            radii_2_times = []
+
+            # These will be temporary lists to accumulate values for a line.
+            # When the end of a line is reached, save the lists in radii_1_lines and radii_1_times.
+            this_list = []
+            this_times = []
+        
+            # This is a flag to assure the first row doesn't cause an error.
+            prev_radius = 999
+        
+            # Using the logic above, find lines for the RMW.
+            for i,radius in enumerate(radii_1):
+                # Save the accumulated lists when the end has been reached.
+                # Except when this is the first row or the list is <2 items long.
+                if radius is None or 5<=abs(radius-prev_radius)<700:
+                    if len(this_list)>1:
+                        radii_1_lines.append(this_list)
+                        radii_1_times.append(this_times)
+                        this_list = []
+                        this_times = []
+                    elif len(this_list):
+                        this_list = []
+                        this_times = []
+                    prev_radius = radius if radius is not None else 999
+                # Extend the current lists.
+                else:
+                    this_list.append(radius)
+                    this_times.append(time[i])
+                    prev_radius = radius
+
+            # If we've reached the end of radii_1, save the accumulated lists.
+            if len(this_list)>1:
+                radii_1_lines.append(this_list)
+                radii_1_times.append(this_times)
+
+            # Now repeat the process, but for the second highest local maximum wind value.
+            this_list = []
+            this_times = []
+            for i,radius in enumerate(radii_2):
+                # Save the accumulated lists when the end has been reached.
+                # Except when this is the first row or the list is <2 items long.
+                if radius is None or 5<=abs(radius-prev_radius)<700:
+                    if len(this_list)>1:
+                        radii_2_lines.append(this_list)
+                        radii_2_times.append(this_times)
+                        this_list = []
+                        this_times = []
+                    elif len(this_list):
+                        this_list = []
+                        this_times = []
+                    prev_radius = radius if radius is not None else 999
+                # Extend the current lists.
+                else:
+                    this_list.append(radius)
+                    this_times.append(time[i])
+                    prev_radius = radius
+
+            # If we've reached the end of radii_2, save the accumulated lists.
+            if len(this_list)>1:
+                radii_2_lines.append(this_list)
+                radii_2_times.append(this_times)
+
+            # Plot the lines!
+            # RMW is a black line highlighted in white to make it stand out.
+            for i,line in enumerate(radii_1_lines):
+                ax.plot(line,radii_1_times[i],linewidth=3,color='white')
+                ax.plot(line,radii_1_times[i],linewidth=2,color='black')
+
+            # The second highest local maximum wind value line is a smaller white dashed line.
+            for i,line in enumerate(radii_2_lines):
+                if len(line)>3:
+                    ax.plot(line,radii_2_times[i],linewidth=1,color='white',linestyle='dashed')
+
+        ############
+        # END EDIT #
+        ############
+
+        #------------------------------------------------------------------------------
+        
         #Plot colorbar
         cbar = plt.colorbar(cf,orientation='horizontal',pad=0.1)
         
